@@ -12,7 +12,7 @@ busted._VERSION     = "Busted 1.8"
 
 -- set defaults
 busted.defaultoutput = path.is_windows and "plain_terminal" or "utf_terminal"
-busted.defaultpattern = '_spec'
+busted.defaultpattern = '_spec.lua$'
 busted.defaultlua = 'luajit'
 busted.lpathprefix = "./src/?.lua;./src/?/?.lua;./src/?/init.lua"
 busted.cpathprefix = path.is_windows and "./csrc/?.dll;./csrc/?/?.dll;" or "./csrc/?.so;./csrc/?/?.so;"
@@ -20,14 +20,17 @@ require('busted.languages.en')-- Load default language pack
 
 local options = {}
 local current_context
+local NO_DATA_PROVIDER = "Constant for no data provider";
 
 -- report a test-process error as a failed test
 local internal_error = function(description, err)
   local tag = ""
+
   if options.tags and #options.tags > 0 then
     -- tags specified; must insert a tag to make sure the error gets displayed
     tag = " #"..options.tags[1]
   end
+
   if not current_context then
     busted.reset()
   end
@@ -114,13 +117,7 @@ local load_testfile = function(filename)
   local old_TEST = _TEST
   _TEST = busted._VERSION
 
-  local success, err = pcall(function() 
-    local chunk,err = moon.loadfile(filename)
-    if not chunk then
-      error(err,2)
-    end
-    chunk()
-  end)
+  local success, err = pcall(function() moon.loadfile(filename)() end)
 
   if not success then
     internal_error("Failed executing testfile; " .. tostring(filename), err)
@@ -271,21 +268,31 @@ next_test = function()
 
       test.done = done
 
-      local ok, err = suite.loop_pcall(test.f, done)
+      local input_values, expected_values
+      if test.data_provider then
+        input_values, expected_values = test.data_provider()
+        assert(#input_values == #expected_values, 'you must provide the same number of input values and expected values')
+      else
+        input_values, expected_values = {NO_DATA_PROVIDER}, {NO_DATA_PROVIDER};
+      end
 
-      if not ok then
-        if type(err) == "table" then
-          err = pretty.write(err)
+      for inp_val_key, inp_val in pairs(input_values) do
+        local ok, err = suite.loop_pcall(test.f, function() end, inp_val, expected_values[inp_val_key])
+        if not ok then
+          if type(err) == "table" then
+            err = pretty.write(err)
+          end
+
+          local trace = debug.traceback("", 2)
+          err, trace = moon.rewrite_traceback(err, trace)
+
+          test.status.type = 'failure'
+          test.status.trace = trace
+          test.status.err = err .. "\nWith input values: " .. pretty.write(inp_val)
         end
-
-        local trace = debug.traceback("", 2)
-
-        err, trace = moon.rewrite_traceback(err, trace)
-
-        test.status.type = 'failure'
-        test.status.trace = trace
-        test.status.err = err
-        done()
+        if #input_values == inp_val_key then
+          done()
+        end 
       end
     end
 
@@ -404,8 +411,13 @@ local create_context = function(desc)
   return context
 end
 
+local suite_name
 
 busted.describe = function(desc, more)
+  if not suite_name then
+    suite_name = desc
+  end
+
   local context = create_context(desc)
 
   for i, parent in ipairs(current_context.parents) do
@@ -506,10 +518,11 @@ busted.pending = function(name)
   suite.tests[#suite.tests+1] = test
 end
 
-busted.it = function(name, sync_test, async_test)
+busted.it = function(name, sync_test, async_test, data_provider)
   local test = {
     context = current_context,
-    name = name
+    name = name,
+    data_provider = data_provider
   }
 
   test.context:increment_test_count()
@@ -518,12 +531,14 @@ busted.it = function(name, sync_test, async_test)
 
   if async_test then
     debug_info = debug.getinfo(async_test)
-    test.f = async_test
+    test.f = function(_, input_value, expected)
+    	async_test(input_value, expected)
+    end
   else
     debug_info = debug.getinfo(sync_test)
     -- make sync test run async
-    test.f = function(done)
-      sync_test()
+    test.f = function(done, input_value, expected)
+      sync_test(input_value, expected)
       done()
     end
   end
@@ -548,6 +563,7 @@ busted.reset = function()
     loop_pcall = pcall,
     loop_step = function() end,
   }
+  suite_name = nil
 end
 
 busted.setloop = function(...)
@@ -582,10 +598,9 @@ end
 busted.run_internal_test = function(describe_tests)
   local suite_bak = suite
   local output_bak = busted.output
-  local current_context_bak = current_context
-  busted.reset()
 
   busted.output = require 'busted.output.stub'()
+
   suite = {
     tests = {},
     done = {},
@@ -595,11 +610,7 @@ busted.run_internal_test = function(describe_tests)
     loop_step = function() end
   }
 
-  if type(describe_tests) == 'function' then
-     describe_tests()
-  else
-     load_testfile(describe_tests)
-  end
+  describe_tests()
 
   repeat
     next_test()
@@ -613,7 +624,6 @@ busted.run_internal_test = function(describe_tests)
   end
 
   suite = suite_bak
-  current_context = current_context_bak
   busted.output = output_bak
 
   return statuses
