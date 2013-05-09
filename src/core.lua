@@ -291,7 +291,7 @@ next_test = function()
           test.status.err = err
           if test.data_provider then
             test.status.err = test.status.err .. "\nWith input values: ";
-            if inp_val.class then
+            if type(inp_val) == "table" and inp_val.class then
               test.status.err = test.status.err .. tostring(inp_val); -- else: buffer overflow
             else
               test.status.err = test.status.err .. pretty.write(inp_val)
